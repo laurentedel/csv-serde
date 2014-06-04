@@ -1,6 +1,5 @@
 package com.bizo.hive.serde.csv;
 
-import java.io.CharArrayReader;
 import java.io.IOException;
 import java.io.Reader;
 import java.io.StringWriter;
@@ -11,7 +10,7 @@ import java.util.List;
 import java.util.Properties;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hive.serde.Constants;
+import org.apache.hadoop.hive.serde.serdeConstants;
 import org.apache.hadoop.hive.serde2.SerDe;
 import org.apache.hadoop.hive.serde2.SerDeException;
 import org.apache.hadoop.hive.serde2.SerDeStats;
@@ -25,7 +24,9 @@ import org.apache.hadoop.hive.serde2.typeinfo.TypeInfo;
 import org.apache.hadoop.hive.serde2.typeinfo.TypeInfoUtils;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
+import org.apache.log4j.Logger;
 
+import au.com.bytecode.opencsv.CSVParser;
 import au.com.bytecode.opencsv.CSVReader;
 import au.com.bytecode.opencsv.CSVWriter;
 
@@ -35,6 +36,7 @@ import au.com.bytecode.opencsv.CSVWriter;
  * 
  * @author Larry Ogrodnek <ogrodnek@gmail.com>
  */
+@SuppressWarnings("deprecation")
 public final class CSVSerde implements SerDe {
   
   private ObjectInspector inspector;
@@ -45,12 +47,15 @@ public final class CSVSerde implements SerDe {
   private char separatorChar;
   private char quoteChar;
   private char escapeChar;
-  
+  private CSVParser csvParser;
+  private boolean ignoreCorruptedLines;
+  Logger logger = Logger.getLogger(CSVSerde.class.getCanonicalName());
     
   @Override
   public void initialize(final Configuration conf, final Properties tbl) throws SerDeException {
-    final List<String> columnNames = Arrays.asList(tbl.getProperty(Constants.LIST_COLUMNS).split(","));
-    final List<TypeInfo> columnTypes = TypeInfoUtils.getTypeInfosFromTypeString(tbl.getProperty(Constants.LIST_COLUMN_TYPES));
+    final List<String> columnNames = Arrays.asList(tbl.getProperty(serdeConstants.LIST_COLUMNS).split(","));
+    @SuppressWarnings("unused")
+    final List<TypeInfo> columnTypes = TypeInfoUtils.getTypeInfosFromTypeString(tbl.getProperty(serdeConstants.LIST_COLUMN_TYPES));
     
     numCols = columnNames.size();
     
@@ -71,6 +76,13 @@ public final class CSVSerde implements SerDe {
     separatorChar = getProperty(tbl, "separatorChar", CSVWriter.DEFAULT_SEPARATOR);
     quoteChar = getProperty(tbl, "quoteChar", CSVWriter.DEFAULT_QUOTE_CHARACTER);
     escapeChar = getProperty(tbl, "escapeChar", CSVWriter.DEFAULT_ESCAPE_CHARACTER);
+    ignoreCorruptedLines = ( getProperty(tbl, "ignoreCorruptedLines", '0') == '0') ? false : true;
+    logger.info("Ignore Corrupted Lines set to " + ignoreCorruptedLines);
+    if (CSVWriter.DEFAULT_ESCAPE_CHARACTER == escapeChar) {
+      this.csvParser = new CSVParser(separatorChar, quoteChar);
+    } else {
+      this.csvParser = new CSVParser(separatorChar, quoteChar, escapeChar);
+    }
   }
   
   private final char getProperty(final Properties tbl, final String property, final char def) {
@@ -122,15 +134,13 @@ public final class CSVSerde implements SerDe {
   @Override
   public Object deserialize(final Writable blob) throws SerDeException {
     Text rowText = (Text) blob;
-    
-    CSVReader csv = null;
+
     try {
-      csv = newReader(new CharArrayReader(rowText.toString().toCharArray()), separatorChar, quoteChar, escapeChar);      
-      final String[] read = csv.readNext();
+      final String[] strings = this.csvParser.parseLine(rowText.toString());
       
-      for (int i=0; i< numCols; i++) {
-        if (read != null && i < read.length) {
-          row.set(i, read[i]);
+      for (int i=0; i < numCols; i++) {
+        if (strings != null && i < strings.length) {
+          row.set(i, strings[i]);
         } else {
           row.set(i, null);
         }
@@ -138,18 +148,18 @@ public final class CSVSerde implements SerDe {
       
       return row;
     } catch (final Exception e) {
-      throw new SerDeException(e);
-    } finally {
-      if (csv != null) {
-        try {
-          csv.close();
-        } catch (final Exception e) {
-          // ignore
-        }
+      logger.error("Exception for row " + row + " : " + e.toString());
+      if(ignoreCorruptedLines){
+//        row.clear();
+        return null;
+        
+      }else{
+        throw new SerDeException(e);
       }
     }
   }
   
+  @SuppressWarnings("unused")
   private CSVReader newReader(final Reader reader, char separator, char quote, char escape) {
     // CSVReader will throw an exception if any of separator, quote, or escape is the same, but 
     // the CSV format specifies that the escape character and quote char are the same... very weird
@@ -177,7 +187,8 @@ public final class CSVSerde implements SerDe {
   public Class<? extends Writable> getSerializedClass() {
     return Text.class;
   }
-  
+ 
+  @Override
   public SerDeStats getSerDeStats() {
     return null;
   }
